@@ -328,3 +328,81 @@ def get_optimization_history():
 
     finally:
         db.close()
+@router.get("/dashboard/summary")
+def get_dashboard_summary():
+    """
+    Generate a summary of current EC2 infrastructure,
+    cost, savings, and carbon optimization metrics.
+    """
+
+    recommendations = generate_ec2_recommendations()
+
+    total_instances = len(recommendations)
+
+    running_instances = sum(
+        1
+        for item in recommendations
+        if item["state"] == "running"
+    )
+
+    idle_instances = sum(
+        1
+        for item in recommendations
+        if item["optimization_status"] == "IDLE"
+    )
+
+    underutilized_instances = sum(
+        1
+        for item in recommendations
+        if item["optimization_status"] == "UNDERUTILIZED"
+    )
+
+    optimized_instances = sum(
+        1
+        for item in recommendations
+        if item["optimization_status"] == "OPTIMIZED"
+    )
+
+    total_monthly_cost = sum(
+        item["estimated_monthly_cost_usd"] or 0
+        for item in recommendations
+    )
+
+    total_potential_savings = sum(
+        item["potential_monthly_savings_usd"] or 0
+        for item in recommendations
+    )
+
+    total_carbon = sum(
+        item["estimated_carbon_kg_monthly"] or 0
+        for item in recommendations
+    )
+
+    total_carbon_reduction = sum(
+        item["potential_carbon_reduction_kg"] or 0
+        for item in recommendations
+    )
+
+    return {
+        "total_instances": total_instances,
+        "running_instances": running_instances,
+        "idle_instances": idle_instances,
+        "underutilized_instances": underutilized_instances,
+        "optimized_instances": optimized_instances,
+        "estimated_monthly_cost_usd": round(
+            total_monthly_cost,
+            2,
+        ),
+        "potential_monthly_savings_usd": round(
+            total_potential_savings,
+            2,
+        ),
+        "estimated_carbon_kg_monthly": round(
+            total_carbon,
+            3,
+        ),
+        "potential_carbon_reduction_kg": round(
+            total_carbon_reduction,
+            3,
+        ),
+    }
