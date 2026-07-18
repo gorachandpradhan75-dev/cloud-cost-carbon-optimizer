@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from sqlalchemy import text
 from app.api.aws import router as aws_router
-from app.core.database import engine
-
-
+from app.core.database import Base, engine
+from app.models.optimization_scan import OptimizationScan
+Base.metadata.create_all(bind=engine)
 app = FastAPI(
     title="Cloud Cost & Carbon Optimizer API",
     description="Backend API for AI-Driven Cloud FinOps and Sustainable Resource Optimization Platform",
