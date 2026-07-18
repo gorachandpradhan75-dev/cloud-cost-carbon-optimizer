@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from sqlalchemy import text
-
+from app.api.aws import router as aws_router
 from app.core.database import engine
 
 
@@ -9,7 +9,7 @@ app = FastAPI(
     description="Backend API for AI-Driven Cloud FinOps and Sustainable Resource Optimization Platform",
     version="1.0.0",
 )
-
+app.include_router(aws_router)
 
 @app.get("/")
 def root():
