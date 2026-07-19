@@ -6,6 +6,7 @@ from app.models.optimization_scan import OptimizationScan
 from app.services.aws_service import (
     get_ec2_instances,
     get_ec2_cpu_utilization,
+    get_ec2_cpu_utilization_multi_period,
 )
 from app.services.optimization_service import analyze_cpu_utilization
 from app.services.cost_service import (
@@ -17,7 +18,10 @@ from app.services.carbon_service import (
     calculate_potential_carbon_reduction,
 )
 
-
+from app.services.optimization_service import (
+    analyze_cpu_utilization,
+    analyze_multi_period_cpu,
+)
 router = APIRouter(
     prefix="/aws",
     tags=["AWS"],
@@ -405,4 +409,105 @@ def get_dashboard_summary():
             total_carbon_reduction,
             3,
         ),
+    }
+@router.get("/ec2/metrics/multi-period")
+def list_ec2_multi_period_metrics():
+    instances = get_ec2_instances()
+
+    metrics = []
+
+    for instance in instances:
+        if instance["state"] != "running":
+            continue
+
+        cpu_data = get_ec2_cpu_utilization_multi_period(
+            instance["instance_id"]
+        )
+
+        metrics.append(
+            {
+                "instance_id": instance["instance_id"],
+                "instance_type": instance["instance_type"],
+                "state": instance["state"],
+                "availability_zone": instance[
+                    "availability_zone"
+                ],
+                "cpu_24h": cpu_data["cpu_24h"],
+                "cpu_7d": cpu_data["cpu_7d"],
+                "cpu_30d": cpu_data["cpu_30d"],
+            }
+        )
+
+    return {
+        "count": len(metrics),
+        "analysis_periods": [
+            "24_hours",
+            "7_days",
+            "30_days",
+        ],
+        "metrics": metrics,
+    }
+
+@router.get("/ec2/recommendations/multi-period")
+def get_ec2_multi_period_recommendations():
+    """
+    Generate Research v2 optimization recommendations
+    using 24-hour, 7-day, and 30-day CloudWatch CPU data.
+    """
+
+    instances = get_ec2_instances()
+
+    recommendations = []
+
+    for instance in instances:
+        if instance["state"] != "running":
+            continue
+
+        # Fetch real multi-period CloudWatch CPU metrics
+        cpu_data = get_ec2_cpu_utilization_multi_period(
+            instance["instance_id"]
+        )
+
+        cpu_24h = cpu_data["cpu_24h"]["average_cpu"]
+        cpu_7d = cpu_data["cpu_7d"]["average_cpu"]
+        cpu_30d = cpu_data["cpu_30d"]["average_cpu"]
+
+        # Research v2 multi-period optimization analysis
+        analysis = analyze_multi_period_cpu(
+            cpu_24h=cpu_24h,
+            cpu_7d=cpu_7d,
+            cpu_30d=cpu_30d,
+        )
+
+        recommendations.append(
+            {
+                "instance_id": instance["instance_id"],
+                "instance_type": instance["instance_type"],
+                "state": instance["state"],
+                "availability_zone": instance[
+                    "availability_zone"
+                ],
+
+                "cpu_utilization": {
+                    "24_hours": cpu_24h,
+                    "7_days": cpu_7d,
+                    "30_days": cpu_30d,
+                },
+
+                "optimization_status": analysis[
+                    "optimization_status"
+                ],
+                "confidence": analysis[
+                    "confidence"
+                ],
+                "recommendation": analysis[
+                    "recommendation"
+                ],
+            }
+        )
+
+    return {
+        "count": len(recommendations),
+        "analysis_method": "multi_period_cpu_analysis",
+        "recommendations": recommendations,
     }
