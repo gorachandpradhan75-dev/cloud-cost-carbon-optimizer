@@ -2,7 +2,11 @@ from fastapi import APIRouter
 
 from app.core.database import SessionLocal
 from app.models.optimization_scan import OptimizationScan
-
+from app.services.cost_explorer_service import (
+    get_actual_aws_cost,
+    get_aws_cost_by_service,
+    get_actual_ec2_cost,
+)
 from app.services.aws_service import (
     get_ec2_instances,
     get_ec2_cpu_utilization,
@@ -510,4 +514,136 @@ def get_ec2_multi_period_recommendations():
         "count": len(recommendations),
         "analysis_method": "multi_period_cpu_analysis",
         "recommendations": recommendations,
+    }
+
+@router.get("/cost/actual")
+def get_aws_actual_cost(days: int = 30):
+    """
+    Fetch actual AWS account-level historical cost
+    from AWS Cost Explorer.
+    """
+
+    cost_data = get_actual_aws_cost(
+        days=days
+    )
+
+    return {
+        "source": "AWS Cost Explorer",
+        "cost_data": cost_data,
+    }
+
+@router.get("/cost/by-service")
+def get_aws_service_costs(days: int = 30):
+    """
+    Fetch actual AWS cost grouped by AWS service
+    using AWS Cost Explorer.
+    """
+
+    cost_data = get_aws_cost_by_service(
+        days=days
+    )
+
+    return {
+        "source": "AWS Cost Explorer",
+        "cost_data": cost_data,
+    }
+
+@router.get("/cost/ec2")
+def get_aws_ec2_actual_cost(days: int = 30):
+    """
+    Fetch actual EC2-related cost
+    from AWS Cost Explorer.
+    """
+
+    cost_data = get_actual_ec2_cost(
+        days=days
+    )
+
+    return {
+        "source": "AWS Cost Explorer",
+        "scope": "EC2",
+        "cost_data": cost_data,
+    }
+
+@router.get("/cost/comparison")
+def get_cost_comparison(days: int = 30):
+    """
+    Compare actual AWS EC2-related billed cost from Cost Explorer
+    with the optimization model's estimated monthly cost
+    and potential monthly savings.
+
+    Note:
+    Actual billed cost and projected monthly cost represent
+    different cost concepts and should not be treated as
+    directly equivalent values.
+    """
+
+    # Fetch actual EC2-related billing data from AWS Cost Explorer
+    actual_cost_data = get_actual_ec2_cost(
+        days=days
+    )
+
+    # Generate current EC2 optimization recommendations
+    recommendations = generate_ec2_recommendations()
+
+    # Calculate projected monthly infrastructure cost
+    estimated_monthly_cost = sum(
+        item["estimated_monthly_cost_usd"] or 0
+        for item in recommendations
+    )
+
+    # Calculate potential monthly savings
+    potential_monthly_savings = sum(
+        item["potential_monthly_savings_usd"] or 0
+        for item in recommendations
+    )
+
+    return {
+        "actual_billing": {
+            "source": "AWS Cost Explorer",
+            "metric": actual_cost_data["metric"],
+            "period": actual_cost_data["period"],
+            "ec2_compute_cost_usd": actual_cost_data[
+                "ec2_compute_cost_usd"
+            ],
+            "ec2_other_cost_usd": actual_cost_data[
+                "ec2_other_cost_usd"
+            ],
+            "actual_ec2_related_cost_usd": actual_cost_data[
+                "total_ec2_related_cost_usd"
+            ],
+            "estimated": actual_cost_data["estimated"],
+        },
+
+        "optimization_model": {
+            "source": "Cloud Cost Optimizer Pricing Model",
+            "instance_count": len(recommendations),
+            "estimated_monthly_cost_usd": round(
+                estimated_monthly_cost,
+                2,
+            ),
+            "potential_monthly_savings_usd": round(
+                potential_monthly_savings,
+                2,
+            ),
+        },
+
+        "analysis": {
+            "actual_cost_basis": (
+                "AWS Cost Explorer UnblendedCost"
+            ),
+            "estimated_cost_basis": (
+                "Projected EC2 monthly cost using the "
+                "optimizer pricing model"
+            ),
+            "savings_basis": (
+                "Potential savings calculated from "
+                "resource utilization recommendations"
+            ),
+            "note": (
+                "Actual billed cost and projected monthly cost "
+                "represent different cost concepts and should "
+                "not be treated as directly equivalent values."
+            ),
+        },
     }
