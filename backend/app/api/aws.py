@@ -1,5 +1,13 @@
-from fastapi import APIRouter
-
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException
+from app.core.database import SessionLocal
+from app.models.aws_account import AWSAccount
+from app.services.aws_session_service import (
+    get_aws_account_identity,
+    assume_role_session,
+)
+from app.services.optimization_service import analyze_multi_period_cpu
 from app.core.database import SessionLocal
 from app.models.optimization_scan import OptimizationScan
 from app.services.cost_explorer_service import (
@@ -30,7 +38,11 @@ router = APIRouter(
     prefix="/aws",
     tags=["AWS"],
 )
-
+class AWSAccountCreate(BaseModel):
+    participant_id: str
+    account_alias: str | None = None
+    role_arn: str
+    default_region: str = "us-east-1"
 
 def generate_ec2_recommendations():
     """
@@ -647,3 +659,625 @@ def get_cost_comparison(days: int = 30):
             ),
         },
     }
+
+@router.get("/accounts/current")
+def get_current_aws_account():
+    """
+    Return the identity of the currently connected AWS account.
+    """
+
+    identity = get_aws_account_identity()
+
+    return {
+        "account_id": identity["account_id"],
+        "arn": identity["arn"],
+    }
+
+@router.post("/accounts")
+def register_aws_account(account: AWSAccountCreate):
+    """
+    Register a participant AWS account.
+
+    Permanent AWS access keys are not stored.
+    Only the cross-account IAM Role ARN is saved.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        existing_account = (
+            db.query(AWSAccount)
+            .filter(
+                AWSAccount.participant_id
+                == account.participant_id
+            )
+            .first()
+        )
+
+        if existing_account:
+            return {
+                "status": "already_exists",
+                "message": (
+                    "Participant ID is already registered."
+                ),
+            }
+
+        aws_account = AWSAccount(
+            participant_id=account.participant_id,
+            account_alias=account.account_alias,
+            role_arn=account.role_arn,
+            default_region=account.default_region,
+            is_active=True,
+        )
+
+        db.add(aws_account)
+        db.commit()
+        db.refresh(aws_account)
+
+        return {
+            "status": "registered",
+            "account": {
+                "id": aws_account.id,
+                "participant_id": aws_account.participant_id,
+                "account_alias": aws_account.account_alias,
+                "default_region": aws_account.default_region,
+                "is_active": aws_account.is_active,
+            },
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts")
+def list_aws_accounts():
+    """
+    List all registered AWS research accounts.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        accounts = (
+            db.query(AWSAccount)
+            .order_by(AWSAccount.id)
+            .all()
+        )
+
+        return {
+            "count": len(accounts),
+            "accounts": [
+                {
+                    "id": account.id,
+                    "participant_id": account.participant_id,
+                    "account_alias": account.account_alias,
+                    "role_arn": account.role_arn,
+                    "default_region": account.default_region,
+                    "is_active": account.is_active,
+                }
+                for account in accounts
+            ],
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/{participant_id}/test-connection")
+def test_participant_account_connection(
+    participant_id: str,
+):
+    """
+    Test STS AssumeRole connectivity for a
+    registered participant AWS account.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        account = (
+            db.query(AWSAccount)
+            .filter(
+                AWSAccount.participant_id
+                == participant_id
+            )
+            .first()
+        )
+
+        if not account:
+            raise HTTPException(
+                status_code=404,
+                detail="Participant account not found.",
+            )
+
+        if not account.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Participant account is inactive.",
+            )
+
+        try:
+            session = assume_role_session(
+                role_arn=account.role_arn
+            )
+
+            identity = get_aws_account_identity(
+                session=session
+            )
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Unable to assume participant "
+                    f"AWS role: {str(exc)}"
+                ),
+            )
+
+        return {
+            "status": "connected",
+            "participant_id": account.participant_id,
+            "account_alias": account.account_alias,
+            "default_region": account.default_region,
+            "aws_identity": {
+                "account_id": identity["account_id"],
+                "arn": identity["arn"],
+            },
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/{participant_id}/ec2")
+def get_participant_ec2_instances(
+    participant_id: str,
+):
+    """
+    Fetch EC2 instances from a registered participant
+    AWS account using STS AssumeRole.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        account = (
+            db.query(AWSAccount)
+            .filter(
+                AWSAccount.participant_id
+                == participant_id
+            )
+            .first()
+        )
+
+        if not account:
+            raise HTTPException(
+                status_code=404,
+                detail="Participant account not found.",
+            )
+
+        if not account.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Participant account is inactive.",
+            )
+
+        try:
+            session = assume_role_session(
+                role_arn=account.role_arn
+            )
+
+            instances = get_ec2_instances(
+                session=session,
+                region_name=account.default_region,
+            )
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Unable to scan participant AWS account: "
+                    f"{str(exc)}"
+                ),
+            )
+
+        return {
+            "participant_id": account.participant_id,
+            "account_alias": account.account_alias,
+            "region": account.default_region,
+            "instance_count": len(instances),
+            "instances": instances,
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/{participant_id}/ec2/metrics")
+def get_participant_ec2_metrics(
+    participant_id: str,
+):
+    db: Session = SessionLocal()
+
+    try:
+        account = (
+            db.query(AWSAccount)
+            .filter(
+                AWSAccount.participant_id == participant_id
+            )
+            .first()
+        )
+
+        if not account:
+            raise HTTPException(
+                status_code=404,
+                detail="Participant account not found.",
+            )
+
+        if not account.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Participant account is inactive.",
+            )
+
+        try:
+            session = assume_role_session(
+                role_arn=account.role_arn
+            )
+
+            instances = get_ec2_instances(
+                session=session,
+                region_name=account.default_region,
+            )
+
+            metrics = []
+
+            for instance in instances:
+                instance_id = instance["instance_id"]
+
+                cpu_24h = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                cpu_7d = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24 * 7,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                cpu_30d = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24 * 30,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                metrics.append(
+                    {
+                        "instance_id": instance_id,
+                        "instance_type": instance["instance_type"],
+                        "state": instance["state"],
+                        "availability_zone": instance[
+                            "availability_zone"
+                        ],
+                        "cpu_24h": cpu_24h,
+                        "cpu_7d": cpu_7d,
+                        "cpu_30d": cpu_30d,
+                    }
+                )
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Unable to fetch participant "
+                    f"CloudWatch metrics: {str(exc)}"
+                ),
+            )
+
+        return {
+            "participant_id": account.participant_id,
+            "account_alias": account.account_alias,
+            "region": account.default_region,
+            "instance_count": len(instances),
+            "analysis_periods": [
+                "24_hours",
+                "7_days",
+                "30_days",
+            ],
+            "metrics": metrics,
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/{participant_id}/ec2/recommendations")
+def get_participant_ec2_recommendations(
+    participant_id: str,
+):
+    """
+    Generate multi-period EC2 optimization recommendations
+    for a registered participant AWS account.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        account = (
+            db.query(AWSAccount)
+            .filter(
+                AWSAccount.participant_id == participant_id
+            )
+            .first()
+        )
+
+        if not account:
+            raise HTTPException(
+                status_code=404,
+                detail="Participant account not found.",
+            )
+
+        if not account.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Participant account is inactive.",
+            )
+
+        try:
+            session = assume_role_session(
+                role_arn=account.role_arn
+            )
+
+            instances = get_ec2_instances(
+                session=session,
+                region_name=account.default_region,
+            )
+
+            recommendations = []
+
+            for instance in instances:
+                instance_id = instance["instance_id"]
+
+                cpu_24h = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                cpu_7d = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24 * 7,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                cpu_30d = get_ec2_cpu_utilization(
+                    instance_id,
+                    hours=24 * 30,
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                analysis = analyze_multi_period_cpu(
+                    cpu_24h["average_cpu"],
+                    cpu_7d["average_cpu"],
+                    cpu_30d["average_cpu"],
+                )
+
+                recommendations.append(
+                    {
+                        "instance_id": instance_id,
+                        "instance_type": instance["instance_type"],
+                        "state": instance["state"],
+                        "availability_zone": instance[
+                            "availability_zone"
+                        ],
+                        "cpu_utilization": {
+                            "24_hours": cpu_24h[
+                                "average_cpu"
+                            ],
+                            "7_days": cpu_7d[
+                                "average_cpu"
+                            ],
+                            "30_days": cpu_30d[
+                                "average_cpu"
+                            ],
+                        },
+                        "optimization_status": analysis[
+                            "optimization_status"
+                        ],
+                        "confidence": analysis[
+                            "confidence"
+                        ],
+                        "recommendation": analysis[
+                            "recommendation"
+                        ],
+                    }
+                )
+
+        except HTTPException:
+            raise
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Unable to generate participant "
+                    f"recommendations: {str(exc)}"
+                ),
+            )
+
+        return {
+            "participant_id": account.participant_id,
+            "account_alias": account.account_alias,
+            "region": account.default_region,
+            "instance_count": len(instances),
+            "analysis_method": "multi_period_cpu_analysis",
+            "recommendations": recommendations,
+        }
+
+    finally:
+        db.close()
+
+@router.post("/accounts/scan-all")
+def scan_all_participant_accounts():
+    """
+    Scan all active registered AWS participant accounts.
+
+    Each account is accessed through STS AssumeRole.
+    A failure in one account does not stop other accounts.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        accounts = (
+            db.query(AWSAccount)
+            .filter(AWSAccount.is_active == True)
+            .order_by(AWSAccount.id)
+            .all()
+        )
+
+        results = []
+
+        successful_scans = 0
+        failed_scans = 0
+        total_instances = 0
+        idle_instances = 0
+        underutilized_instances = 0
+        normal_instances = 0
+        unknown_instances = 0
+        
+        for account in accounts:
+            try:
+                session = assume_role_session(
+                    role_arn=account.role_arn
+                )
+
+                instances = get_ec2_instances(
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                account_recommendations = []
+
+                for instance in instances:
+                    instance_id = instance["instance_id"]
+
+                    cpu_24h = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_7d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 7,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_30d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 30,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    analysis = analyze_multi_period_cpu(
+                        cpu_24h["average_cpu"],
+                        cpu_7d["average_cpu"],
+                        cpu_30d["average_cpu"],
+                    )
+                    status = analysis["optimization_status"]
+
+                    if status == "IDLE":
+                        idle_instances += 1
+
+                    elif status == "UNDERUTILIZED":
+                        underutilized_instances += 1
+
+                    elif status == "NORMAL":
+                        normal_instances += 1
+
+                    else:
+                        unknown_instances += 1
+                    account_recommendations.append(
+                        {
+                            "instance_id": instance_id,
+                            "instance_type": instance[
+                                "instance_type"
+                            ],
+                            "state": instance["state"],
+                            "cpu_utilization": {
+                                "24_hours": cpu_24h[
+                                    "average_cpu"
+                                ],
+                                "7_days": cpu_7d[
+                                    "average_cpu"
+                                ],
+                                "30_days": cpu_30d[
+                                    "average_cpu"
+                                ],
+                            },
+                            "optimization_status": analysis[
+                                "optimization_status"
+                            ],
+                            "confidence": analysis[
+                                "confidence"
+                            ],
+                            "recommendation": analysis[
+                                "recommendation"
+                            ],
+                        }
+                    )
+
+                instance_count = len(instances)
+
+                total_instances += instance_count
+                successful_scans += 1
+
+                results.append(
+                    {
+                        "participant_id": account.participant_id,
+                        "account_alias": account.account_alias,
+                        "region": account.default_region,
+                        "scan_status": "SUCCESS",
+                        "instance_count": instance_count,
+                        "recommendations": account_recommendations,
+                    }
+                )
+
+            except Exception as exc:
+                failed_scans += 1
+
+                results.append(
+                    {
+                        "participant_id": account.participant_id,
+                        "account_alias": account.account_alias,
+                        "region": account.default_region,
+                        "scan_status": "FAILED",
+                        "instance_count": 0,
+                        "error": str(exc),
+                        "recommendations": [],
+                    }
+                )
+
+        return {
+            "scan_type": "multi_account_optimization_scan",
+            "total_accounts": len(accounts),
+            "successful_scans": successful_scans,
+            "failed_scans": failed_scans,
+            "total_instances": total_instances,
+            "optimization_summary": {
+                "idle_instances": idle_instances,
+                "underutilized_instances": underutilized_instances,
+                "normal_instances": normal_instances,
+                "unknown_instances": unknown_instances,
+            },
+            "accounts": results,
+        }
+    finally:
+        db.close()

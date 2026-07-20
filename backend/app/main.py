@@ -5,7 +5,7 @@ from sqlalchemy import text
 from app.api.aws import router as aws_router
 from app.core.database import Base, engine
 from app.models.optimization_scan import OptimizationScan
-
+from app.models.aws_account import AWSAccount
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
