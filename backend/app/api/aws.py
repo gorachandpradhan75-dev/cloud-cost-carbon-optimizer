@@ -7,6 +7,7 @@ from app.services.aws_session_service import (
     get_aws_account_identity,
     assume_role_session,
 )
+from datetime import date, timedelta
 from app.services.optimization_service import analyze_multi_period_cpu
 from app.core.database import SessionLocal
 from app.models.optimization_scan import OptimizationScan
@@ -1279,5 +1280,457 @@ def scan_all_participant_accounts():
             },
             "accounts": results,
         }
+    finally:
+        db.close()
+
+
+
+@router.get("/accounts/dashboard/summary")
+def get_multi_account_dashboard_summary():
+    """
+    Return aggregated dashboard summary
+    across all registered AWS accounts.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        accounts = (
+            db.query(AWSAccount)
+            .filter(AWSAccount.is_active == True)
+            .order_by(AWSAccount.id)
+            .all()
+        )
+
+        total_accounts = len(accounts)
+        active_accounts = len(accounts)
+
+        total_instances = 0
+        idle_instances = 0
+        underutilized_instances = 0
+        normal_instances = 0
+        unknown_instances = 0
+
+        successful_accounts = 0
+        failed_accounts = 0
+
+        for account in accounts:
+            try:
+                session = assume_role_session(
+                    role_arn=account.role_arn
+                )
+
+                instances = get_ec2_instances(
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                successful_accounts += 1
+                total_instances += len(instances)
+
+                for instance in instances:
+                    instance_id = instance["instance_id"]
+
+                    cpu_24h = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_7d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 7,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_30d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 30,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    analysis = analyze_multi_period_cpu(
+                        cpu_24h["average_cpu"],
+                        cpu_7d["average_cpu"],
+                        cpu_30d["average_cpu"],
+                    )
+
+                    status = analysis["optimization_status"]
+
+                    if status == "IDLE":
+                        idle_instances += 1
+
+                    elif status == "UNDERUTILIZED":
+                        underutilized_instances += 1
+
+                    elif status == "NORMAL":
+                        normal_instances += 1
+
+                    else:
+                        unknown_instances += 1
+
+            except Exception:
+                failed_accounts += 1
+
+        optimization_opportunities = (
+            idle_instances + underutilized_instances
+        )
+
+        return {
+            "dashboard_type": (
+                "multi_account_optimization_dashboard"
+            ),
+            "total_accounts": total_accounts,
+            "active_accounts": active_accounts,
+            "successful_accounts": successful_accounts,
+            "failed_accounts": failed_accounts,
+            "total_instances": total_instances,
+            "optimization_summary": {
+                "idle_instances": idle_instances,
+                "underutilized_instances": (
+                    underutilized_instances
+                ),
+                "normal_instances": normal_instances,
+                "unknown_instances": unknown_instances,
+            },
+            "optimization_opportunities": (
+                optimization_opportunities
+            ),
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/cost/summary")
+def get_multi_account_cost_summary(days: int = 30):
+    """
+    Aggregate AWS Cost Explorer billing data
+    across all active registered participant accounts.
+    """
+
+    db = SessionLocal()
+
+    try:
+        accounts = (
+            db.query(AWSAccount)
+            .filter(AWSAccount.is_active == True)
+            .all()
+        )
+
+        results = []
+
+        successful_accounts = 0
+        failed_accounts = 0
+        total_cost_usd = 0.0
+
+        for account in accounts:
+            try:
+                # Create cross-account AWS session
+                session = assume_role_session(
+                    role_arn=account.role_arn
+                )
+
+                # Cost Explorer client
+                ce_client = session.client(
+                    "ce",
+                    region_name="us-east-1"
+                )
+
+                end_date = date.today()
+                start_date = end_date - timedelta(
+                    days=days
+                )
+
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        "Start": start_date.isoformat(),
+                        "End": end_date.isoformat(),
+                    },
+                    Granularity="MONTHLY",
+                    Metrics=["UnblendedCost"],
+                )
+
+                account_cost = 0.0
+
+                for period in response.get(
+                    "ResultsByTime", []
+                ):
+                    amount = (
+                        period
+                        .get("Total", {})
+                        .get("UnblendedCost", {})
+                        .get("Amount", "0")
+                    )
+
+                    account_cost += float(amount)
+
+                total_cost_usd += account_cost
+                successful_accounts += 1
+
+                results.append(
+                    {
+                        "participant_id":
+                            account.participant_id,
+                        "account_alias":
+                            account.account_alias,
+                        "region":
+                            account.default_region,
+                        "cost_usd":
+                            round(account_cost, 8),
+                        "status": "SUCCESS",
+                    }
+                )
+
+            except Exception as exc:
+                failed_accounts += 1
+
+                results.append(
+                    {
+                        "participant_id":
+                            account.participant_id,
+                        "account_alias":
+                            account.account_alias,
+                        "region":
+                            account.default_region,
+                        "cost_usd": 0,
+                        "status": "FAILED",
+                        "error": str(exc),
+                    }
+                )
+
+        return {
+            "summary_type":
+                "multi_account_cost_summary",
+            "analysis_period_days":
+                days,
+            "total_accounts":
+                len(accounts),
+            "successful_accounts":
+                successful_accounts,
+            "failed_accounts":
+                failed_accounts,
+            "total_cost_usd":
+                round(total_cost_usd, 8),
+            "accounts":
+                results,
+        }
+
+    finally:
+        db.close()
+
+@router.get("/accounts/research/dashboard")
+def get_research_dashboard(days: int = 30):
+    """
+    Combined research dashboard for multi-account
+    cloud cost and optimization analysis.
+    """
+
+    db: Session = SessionLocal()
+
+    try:
+        accounts = (
+            db.query(AWSAccount)
+            .filter(AWSAccount.is_active == True)
+            .all()
+        )
+
+        total_accounts = len(accounts)
+        successful_accounts = 0
+        failed_accounts = 0
+
+        total_instances = 0
+        idle_instances = 0
+        underutilized_instances = 0
+        normal_instances = 0
+        unknown_instances = 0
+
+        total_cost_usd = 0.0
+
+        account_results = []
+
+        for account in accounts:
+            try:
+                # Assume participant AWS role
+                session = assume_role_session(
+                    role_arn=account.role_arn
+                )
+
+                # -------------------------
+                # EC2 + OPTIMIZATION DATA
+                # -------------------------
+
+                instances = get_ec2_instances(
+                    session=session,
+                    region_name=account.default_region,
+                )
+
+                instance_count = len(instances)
+                total_instances += instance_count
+
+                for instance in instances:
+                    instance_id = instance["instance_id"]
+
+                    cpu_24h = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_7d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 7,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    cpu_30d = get_ec2_cpu_utilization(
+                        instance_id,
+                        hours=24 * 30,
+                        session=session,
+                        region_name=account.default_region,
+                    )
+
+                    analysis = analyze_multi_period_cpu(
+                        cpu_24h["average_cpu"],
+                        cpu_7d["average_cpu"],
+                        cpu_30d["average_cpu"],
+                    )
+
+                    status = analysis["optimization_status"]
+
+                    if status == "IDLE":
+                        idle_instances += 1
+
+                    elif status == "UNDERUTILIZED":
+                        underutilized_instances += 1
+
+                    elif status == "NORMAL":
+                        normal_instances += 1
+
+                    else:
+                        unknown_instances += 1
+
+                # -------------------------
+                # COST EXPLORER DATA
+                # -------------------------
+
+                ce_client = session.client(
+                    "ce",
+                    region_name="us-east-1",
+                )
+
+                end_date = date.today()
+                start_date = end_date - timedelta(
+                    days=days
+                )
+
+                cost_response = (
+                    ce_client.get_cost_and_usage(
+                        TimePeriod={
+                            "Start":
+                                start_date.isoformat(),
+                            "End":
+                                end_date.isoformat(),
+                        },
+                        Granularity="MONTHLY",
+                        Metrics=["UnblendedCost"],
+                    )
+                )
+
+                account_cost = 0.0
+
+                for period in cost_response.get(
+                    "ResultsByTime", []
+                ):
+                    amount = (
+                        period
+                        .get("Total", {})
+                        .get("UnblendedCost", {})
+                        .get("Amount", "0")
+                    )
+
+                    account_cost += float(amount)
+
+                total_cost_usd += account_cost
+                successful_accounts += 1
+
+                account_results.append(
+                    {
+                        "participant_id":
+                            account.participant_id,
+                        "account_alias":
+                            account.account_alias,
+                        "region":
+                            account.default_region,
+                        "status": "SUCCESS",
+                        "instance_count":
+                            instance_count,
+                        "cost_usd":
+                            round(account_cost, 8),
+                    }
+                )
+
+            except Exception as exc:
+                failed_accounts += 1
+
+                account_results.append(
+                    {
+                        "participant_id":
+                            account.participant_id,
+                        "account_alias":
+                            account.account_alias,
+                        "region":
+                            account.default_region,
+                        "status": "FAILED",
+                        "error": str(exc),
+                    }
+                )
+
+        optimization_opportunities = (
+            idle_instances
+            + underutilized_instances
+        )
+
+        return {
+            "dashboard_type":
+                "multi_account_research_dashboard",
+            "analysis_period_days":
+                days,
+            "accounts_summary": {
+                "total_accounts":
+                    total_accounts,
+                "successful_accounts":
+                    successful_accounts,
+                "failed_accounts":
+                    failed_accounts,
+            },
+            "infrastructure_summary": {
+                "total_instances":
+                    total_instances,
+            },
+            "optimization_summary": {
+                "idle_instances":
+                    idle_instances,
+                "underutilized_instances":
+                    underutilized_instances,
+                "normal_instances":
+                    normal_instances,
+                "unknown_instances":
+                    unknown_instances,
+                "optimization_opportunities":
+                    optimization_opportunities,
+            },
+            "cost_summary": {
+                "total_cost_usd":
+                    round(total_cost_usd, 8),
+            },
+            "accounts":
+                account_results,
+        }
+
     finally:
         db.close()
