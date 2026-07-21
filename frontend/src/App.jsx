@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+
 import {
   BarChart,
   Bar,
@@ -12,159 +13,296 @@ import {
 } from "recharts";
 
 import {
-  getDashboardSummary,
-  runOptimizationScan,
-  getEC2Recommendations,
   getOptimizationHistory,
+  getMultiAccountDashboard,
+  getAWSAccounts,
+  getParticipantEC2,
+  getParticipantEC2Metrics,
+  getParticipantRecommendations,
+  runMultiAccountScan,
+  getResearchDashboard,
+  getMultiAccountCostSummary,
 } from "./services/api";
 
 import "./App.css";
 
 function App() {
+  // ============================================
+  // State
+  // ============================================
+
   const [summary, setSummary] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
   const [history, setHistory] = useState([]);
+
+  const [accounts, setAccounts] = useState([]);
+  const [participantEC2, setParticipantEC2] = useState(null);
+  const [participantMetrics, setParticipantMetrics] = useState(null);
+  const [researchDashboard, setResearchDashboard] = useState(null);
+  const [costSummary, setCostSummary] = useState(null);
+
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState(null);
 
-  // Load dashboard summary and recommendations
+  const PARTICIPANT_ID = "Participant-001";
+
+  // ============================================
+  // Load Dashboard
+  // ============================================
+
   const loadDashboard = async () => {
     try {
       setLoading(true);
       setError(null);
 
       const [
-  summaryData,
-  recommendationsData,
-  historyData,
-] = await Promise.all([
-  getDashboardSummary(),
-  getEC2Recommendations(),
-  getOptimizationHistory(),
-]);
+        dashboardData,
+        accountsData,
+        ec2Data,
+        metricsData,
+        recommendationsData,
+        historyData,
+        researchData,
+        costData,
+      ] = await Promise.all([
+        getMultiAccountDashboard(),
+        getAWSAccounts(),
+        getParticipantEC2(PARTICIPANT_ID),
+        getParticipantEC2Metrics(PARTICIPANT_ID),
+        getParticipantRecommendations(PARTICIPANT_ID),
+        getOptimizationHistory(),
+        getResearchDashboard(),
+        getMultiAccountCostSummary(),
+      ]);
 
-setSummary(summaryData);
+      setSummary(dashboardData);
 
-setRecommendations(
-  recommendationsData.recommendations || []
-);
+      setAccounts(accountsData?.accounts || []);
 
-setHistory(
-  historyData.history || []
-);
+      setParticipantEC2(ec2Data || null);
 
+      setParticipantMetrics(metricsData || null);
+
+      setRecommendations(
+        recommendationsData?.recommendations || []
+      );
+
+      setHistory(historyData?.history || []);
+
+      setResearchDashboard(researchData || null);
+
+      setCostSummary(costData || null);
     } catch (err) {
       console.error("Dashboard loading error:", err);
 
       setError(
-        "Failed to load dashboard data. Make sure the backend server is running."
+        "Failed to load multi-account dashboard data. Make sure the backend server is running."
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // Load dashboard when application starts
+  // ============================================
+  // Initial Load
+  // ============================================
+
   useEffect(() => {
     loadDashboard();
   }, []);
 
-  // Run optimization scan
+  // ============================================
+  // Run Multi Account Scan
+  // ============================================
+
   const handleScan = async () => {
     try {
       setScanning(true);
       setError(null);
 
-      await runOptimizationScan();
+      await runMultiAccountScan();
 
-      // Refresh dashboard data after scan
       await loadDashboard();
     } catch (err) {
-      console.error("Optimization scan error:", err);
+      console.error(
+        "Multi-account optimization scan error:",
+        err
+      );
 
       setError(
-        "Optimization scan failed. Please check the backend server."
+        "Multi-account optimization scan failed. Please check the backend server."
       );
     } finally {
       setScanning(false);
     }
   };
 
-  // ================================
-  // Chart Data
-  // ================================
+  // ============================================
+  // Derived Dashboard Values
+  // ============================================
 
-  // CPU utilization data for each EC2 instance
-  const cpuChartData = recommendations.map(
-    (item, index) => ({
-      name: `EC2-${index + 1}`,
-      instanceId: item.instance_id,
-      cpu: Number(item.average_cpu_24h ?? 0),
-    })
-  );
+  const totalAccounts =
+    Number(summary?.total_accounts ?? accounts.length ?? 0);
 
-  // Cost vs savings
-  const costChartData = [
+  const activeAccounts =
+    Number(summary?.active_accounts ?? 0);
+
+  const totalInstances =
+    Number(
+      summary?.total_instances ??
+        researchDashboard?.infrastructure_summary
+          ?.total_instances ??
+        participantEC2?.instance_count ??
+        0
+    );
+
+  const idleInstances =
+    Number(
+      summary?.optimization_summary?.idle_instances ??
+        researchDashboard?.optimization_summary
+          ?.idle_instances ??
+        0
+    );
+
+  const underutilizedInstances =
+    Number(
+      summary?.optimization_summary
+        ?.underutilized_instances ??
+        researchDashboard?.optimization_summary
+          ?.underutilized_instances ??
+        0
+    );
+
+  const normalInstances =
+    Number(
+      summary?.optimization_summary?.normal_instances ??
+        researchDashboard?.optimization_summary
+          ?.normal_instances ??
+        0
+    );
+
+  const optimizationOpportunities =
+    Number(
+      summary?.optimization_opportunities ??
+        researchDashboard?.optimization_summary
+          ?.optimization_opportunities ??
+        idleInstances + underutilizedInstances
+    );
+
+  const runningInstances =
+    participantEC2?.instances?.filter(
+      (instance) =>
+        instance.state?.toLowerCase() === "running"
+    ).length ?? 0;
+
+  const totalCost =
+    Number(
+      costSummary?.total_cost_usd ??
+        researchDashboard?.cost_summary?.total_cost_usd ??
+        0
+    );
+
+  // ============================================
+  // Current Account
+  // ============================================
+
+  const currentAccount =
+    accounts.find(
+      (account) =>
+        account.participant_id === PARTICIPANT_ID
+    ) || accounts[0];
+
+  // ============================================
+  // CPU Chart Data
+  // ============================================
+
+  const cpuChartData =
+    participantMetrics?.metrics?.map(
+      (item, index) => ({
+        name: `EC2-${index + 1}`,
+        instanceId: item.instance_id,
+
+        cpu24: Number(
+          item.cpu_24h?.average_cpu ?? 0
+        ),
+
+        cpu7: Number(
+          item.cpu_7d?.average_cpu ?? 0
+        ),
+
+        cpu30: Number(
+          item.cpu_30d?.average_cpu ?? 0
+        ),
+      })
+    ) || [];
+
+  // ============================================
+  // Optimization Chart
+  // ============================================
+
+  const optimizationChartData = [
     {
-      name: "Monthly Cost",
-      value: Number(
-        summary?.estimated_monthly_cost_usd ?? 0
-      ),
+      name: "Idle",
+      value: idleInstances,
     },
     {
-      name: "Potential Savings",
-      value: Number(
-        summary?.potential_monthly_savings_usd ?? 0
-      ),
+      name: "Underutilized",
+      value: underutilizedInstances,
+    },
+    {
+      name: "Normal",
+      value: normalInstances,
     },
   ];
 
-  // Carbon emissions vs reduction
-  const carbonChartData = [
-    {
-      name: "Carbon Emissions",
-      value: Number(
-        summary?.estimated_carbon_kg_monthly ?? 0
+  // ============================================
+  // Historical Analytics
+  // ============================================
+
+  const historicalChartData = [...history]
+    .sort((a, b) => a.id - b.id)
+    .map((item) => ({
+      scanId: `#${item.id}`,
+
+      cpu: Number(
+        item.average_cpu_24h ?? 0
       ),
-    },
-    {
-      name: "Potential Reduction",
-      value: Number(
-        summary?.potential_carbon_reduction_kg ?? 0
+
+      cost: Number(
+        item.estimated_monthly_cost_usd ?? 0
       ),
-    },
-  ];
-  // Historical analytics data
-const historicalChartData = [...history]
-  .sort((a, b) => a.id - b.id)
-  .map((item) => ({
-    scanId: `#${item.id}`,
-    cpu: Number(item.average_cpu_24h ?? 0),
-    cost: Number(item.estimated_monthly_cost_usd ?? 0),
-    savings: Number(item.potential_monthly_savings_usd ?? 0),
-    carbonReduction: Number(
-      item.potential_carbon_reduction_kg ?? 0
-    ),
-    time: item.created_at
-      ? new Date(item.created_at).toLocaleString()
-      : "N/A",
-  }));
-  // ================================
+
+      savings: Number(
+        item.potential_monthly_savings_usd ?? 0
+      ),
+
+      carbonReduction: Number(
+        item.potential_carbon_reduction_kg ?? 0
+      ),
+
+      time: item.created_at
+        ? new Date(
+            item.created_at
+          ).toLocaleString()
+        : "N/A",
+    }));
+
+  // ============================================
   // Loading Screen
-  // ================================
+  // ============================================
 
   if (loading && !summary) {
     return (
       <div className="loading">
-        Loading dashboard...
+        Loading multi-account dashboard...
       </div>
     );
   }
 
-  // ================================
+  // ============================================
   // Error Screen
-  // ================================
+  // ============================================
 
   if (error && !summary) {
     return (
@@ -174,17 +312,26 @@ const historicalChartData = [...history]
     );
   }
 
+  // ============================================
+  // UI
+  // ============================================
+
   return (
     <div className="dashboard">
 
-      {/* ============================
+      {/* ========================================
           Dashboard Header
-      ============================ */}
+      ======================================== */}
 
       <div className="dashboard-header">
         <div>
-          <h1>Cloud Cost & Carbon Optimizer</h1>
-          <p>Dashboard Overview</p>
+          <h1>
+            Cloud Cost & Carbon Optimizer
+          </h1>
+
+          <p>
+            Multi-Account AWS Research Dashboard
+          </p>
         </div>
 
         <button
@@ -193,12 +340,14 @@ const historicalChartData = [...history]
           disabled={scanning}
         >
           {scanning
-            ? "Scanning..."
-            : "Run Optimization Scan"}
+            ? "Scanning All Accounts..."
+            : "Scan All AWS Accounts"}
         </button>
       </div>
 
-      {/* Error Message */}
+      {/* ========================================
+          Error Message
+      ======================================== */}
 
       {error && (
         <div className="error-message">
@@ -206,127 +355,260 @@ const historicalChartData = [...history]
         </div>
       )}
 
-      {/* ============================
+      {/* ========================================
           Dashboard Summary Cards
-      ============================ */}
+      ======================================== */}
 
       <div className="card-grid">
 
         <div className="card">
-          <p>Total Instances</p>
+          <p>Total AWS Accounts</p>
+          <h2>{totalAccounts}</h2>
+        </div>
 
-          <h2>
-            {summary?.total_instances ?? 0}
-          </h2>
+        <div className="card">
+          <p>Active Accounts</p>
+          <h2>{activeAccounts}</h2>
+        </div>
+
+        <div className="card">
+          <p>Total EC2 Instances</p>
+          <h2>{totalInstances}</h2>
         </div>
 
         <div className="card">
           <p>Running Instances</p>
-
-          <h2>
-            {summary?.running_instances ?? 0}
-          </h2>
+          <h2>{runningInstances}</h2>
         </div>
 
         <div className="card">
           <p>Idle Instances</p>
-
-          <h2>
-            {summary?.idle_instances ?? 0}
-          </h2>
+          <h2>{idleInstances}</h2>
         </div>
 
         <div className="card">
           <p>Underutilized Instances</p>
-
-          <h2>
-            {summary?.underutilized_instances ?? 0}
-          </h2>
+          <h2>{underutilizedInstances}</h2>
         </div>
 
         <div className="card">
-          <p>Optimized Instances</p>
-
-          <h2>
-            {summary?.optimized_instances ?? 0}
-          </h2>
+          <p>Normal Instances</p>
+          <h2>{normalInstances}</h2>
         </div>
 
         <div className="card">
-          <p>Estimated Monthly Cost</p>
-
-          <h2>
-            $
-            {Number(
-              summary?.estimated_monthly_cost_usd ?? 0
-            ).toFixed(2)}
-          </h2>
+          <p>Optimization Opportunities</p>
+          <h2>{optimizationOpportunities}</h2>
         </div>
 
         <div className="card">
-          <p>Potential Monthly Savings</p>
+          <p>30-Day AWS Cost</p>
 
           <h2>
-            $
-            {Number(
-              summary?.potential_monthly_savings_usd ?? 0
-            ).toFixed(2)}
-          </h2>
-        </div>
-
-        <div className="card">
-          <p>Carbon Emissions</p>
-
-          <h2>
-            {Number(
-              summary?.estimated_carbon_kg_monthly ?? 0
-            ).toFixed(3)}{" "}
-            kg/month
-          </h2>
-        </div>
-
-        <div className="card">
-          <p>Potential Carbon Reduction</p>
-
-          <h2>
-            {Number(
-              summary?.potential_carbon_reduction_kg ?? 0
-            ).toFixed(3)}{" "}
-            kg
+            ${totalCost.toFixed(2)}
           </h2>
         </div>
 
       </div>
 
-      {/* ============================
-          Visual Analytics
-      ============================ */}
+      {/* ========================================
+          Current AWS Account
+      ======================================== */}
 
-      <section className="analytics-section">
+      <section className="recommendations-section">
 
         <div className="section-header">
           <div>
-            <h2>Visual Analytics</h2>
+            <h2>
+              Current AWS Research Account
+            </h2>
 
             <p>
-              Real-time visualization of EC2 utilization,
-              cloud cost optimization, and carbon impact.
+              Registered participant account currently
+              being analyzed by the optimizer.
             </p>
           </div>
         </div>
 
+        {currentAccount ? (
+          <div className="table-container">
+
+            <table className="recommendations-table">
+
+              <thead>
+                <tr>
+                  <th>Participant ID</th>
+                  <th>Account Alias</th>
+                  <th>Region</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                <tr>
+                  <td>
+                    {currentAccount.participant_id}
+                  </td>
+
+                  <td>
+                    {currentAccount.account_alias}
+                  </td>
+
+                  <td>
+                    {currentAccount.default_region}
+                  </td>
+
+                  <td>
+                    <span className="status-badge normal">
+                      {currentAccount.is_active
+                        ? "ACTIVE"
+                        : "INACTIVE"}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+
+            </table>
+
+          </div>
+        ) : (
+          <div className="no-data">
+            No registered AWS account available.
+          </div>
+        )}
+
+      </section>
+
+      {/* ========================================
+          EC2 Infrastructure
+      ======================================== */}
+
+      <section className="recommendations-section">
+
+        <div className="section-header">
+          <div>
+            <h2>
+              EC2 Infrastructure
+            </h2>
+
+            <p>
+              Live EC2 resources discovered from
+              Participant-001.
+            </p>
+          </div>
+        </div>
+
+        {!participantEC2?.instances?.length ? (
+
+          <div className="no-data">
+            No EC2 instances available.
+          </div>
+
+        ) : (
+
+          <div className="table-container">
+
+            <table className="recommendations-table">
+
+              <thead>
+                <tr>
+                  <th>Instance ID</th>
+                  <th>Type</th>
+                  <th>State</th>
+                  <th>Availability Zone</th>
+                  <th>Region</th>
+                  <th>Launch Time</th>
+                </tr>
+              </thead>
+
+              <tbody>
+
+                {participantEC2.instances.map(
+                  (instance) => (
+
+                    <tr key={instance.instance_id}>
+
+                      <td className="instance-id">
+                        {instance.instance_id}
+                      </td>
+
+                      <td>
+                        {instance.instance_type}
+                      </td>
+
+                      <td>
+                        <span className="status-badge normal">
+                          {instance.state?.toUpperCase()}
+                        </span>
+                      </td>
+
+                      <td>
+                        {instance.availability_zone}
+                      </td>
+
+                      <td>
+                        {participantEC2.region}
+                      </td>
+
+                      <td>
+                        {instance.launch_time
+                          ? new Date(
+                              instance.launch_time
+                            ).toLocaleString()
+                          : "N/A"}
+                      </td>
+
+                    </tr>
+
+                  )
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        )}
+
+      </section>
+
+      {/* ========================================
+          Visual Analytics
+      ======================================== */}
+
+      <section className="analytics-section">
+
+        <div className="section-header">
+
+          <div>
+
+            <h2>
+              Multi-Period Visual Analytics
+            </h2>
+
+            <p>
+              AWS EC2 CPU utilization across 24-hour,
+              7-day, and 30-day analysis periods.
+            </p>
+
+          </div>
+
+        </div>
+
         <div className="charts-grid">
 
-          {/* ========================
-              CPU Utilization Chart
-          ======================== */}
+          {/* CPU Chart */}
 
           <div className="chart-card">
 
-            <h3>EC2 CPU Utilization</h3>
+            <h3>
+              EC2 Multi-Period CPU Utilization
+            </h3>
 
             <p className="chart-description">
-              Average CPU utilization over the last 24 hours.
+              Compare average CPU utilization across
+              multiple analysis periods.
             </p>
 
             <div className="chart-wrapper">
@@ -335,6 +617,7 @@ const historicalChartData = [...history]
                 width="100%"
                 height={300}
               >
+
                 <BarChart data={cpuChartData}>
 
                   <CartesianGrid
@@ -355,148 +638,97 @@ const historicalChartData = [...history]
                   <Tooltip
                     contentStyle={{
                       backgroundColor: "#1e293b",
-                      border: "1px solid #334155",
+                      border:
+                        "1px solid #334155",
                       borderRadius: "8px",
-                    }}
-                    labelStyle={{
-                      color: "#f8fafc",
                     }}
                   />
 
                   <Bar
-                    dataKey="cpu"
-                    name="CPU Usage"
+                    dataKey="cpu24"
+                    name="24 Hours"
+                    fill="#3b82f6"
+                    radius={[6, 6, 0, 0]}
+                  />
+
+                  <Bar
+                    dataKey="cpu7"
+                    name="7 Days"
+                    fill="#22c55e"
+                    radius={[6, 6, 0, 0]}
+                  />
+
+                  <Bar
+                    dataKey="cpu30"
+                    name="30 Days"
+                    fill="#f59e0b"
+                    radius={[6, 6, 0, 0]}
+                  />
+
+                </BarChart>
+
+              </ResponsiveContainer>
+
+            </div>
+
+          </div>
+
+          {/* Optimization Summary */}
+
+          <div className="chart-card">
+
+            <h3>
+              Optimization Classification
+            </h3>
+
+            <p className="chart-description">
+              Distribution of EC2 optimization
+              classifications.
+            </p>
+
+            <div className="chart-wrapper">
+
+              <ResponsiveContainer
+                width="100%"
+                height={300}
+              >
+
+                <BarChart
+                  data={optimizationChartData}
+                >
+
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="#334155"
+                  />
+
+                  <XAxis
+                    dataKey="name"
+                    stroke="#94a3b8"
+                  />
+
+                  <YAxis
+                    stroke="#94a3b8"
+                  />
+
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#1e293b",
+                      border:
+                        "1px solid #334155",
+                      borderRadius: "8px",
+                    }}
+                  />
+
+                  <Bar
+                    dataKey="value"
+                    name="Instances"
                     fill="#3b82f6"
                     radius={[6, 6, 0, 0]}
                   />
 
                 </BarChart>
-              </ResponsiveContainer>
 
-            </div>
-
-          </div>
-
-          {/* ========================
-              Cost vs Savings Chart
-          ======================== */}
-
-          <div className="chart-card">
-
-            <h3>
-              Cost vs Potential Savings
-            </h3>
-
-            <p className="chart-description">
-              Estimated monthly cloud cost and optimization
-              savings opportunity.
-            </p>
-
-            <div className="chart-wrapper">
-
-              <ResponsiveContainer
-                width="100%"
-                height={300}
-              >
-                <BarChart data={costChartData}>
-
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="#334155"
-                  />
-
-                  <XAxis
-                    dataKey="name"
-                    stroke="#94a3b8"
-                  />
-
-                  <YAxis
-                    stroke="#94a3b8"
-                  />
-
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#1e293b",
-                      border: "1px solid #334155",
-                      borderRadius: "8px",
-                    }}
-                    formatter={(value) => [
-                      `$${Number(value).toFixed(2)}`,
-                      "USD",
-                    ]}
-                  />
-
-                  <Bar
-                    dataKey="value"
-                    name="USD"
-                    fill="#22c55e"
-                    radius={[6, 6, 0, 0]}
-                  />
-
-                </BarChart>
-              </ResponsiveContainer>
-
-            </div>
-
-          </div>
-
-          {/* ========================
-              Carbon Impact Chart
-          ======================== */}
-
-          <div className="chart-card">
-
-            <h3>
-              Carbon Impact
-            </h3>
-
-            <p className="chart-description">
-              Estimated monthly carbon emissions and potential
-              carbon reduction.
-            </p>
-
-            <div className="chart-wrapper">
-
-              <ResponsiveContainer
-                width="100%"
-                height={300}
-              >
-                <BarChart data={carbonChartData}>
-
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="#334155"
-                  />
-
-                  <XAxis
-                    dataKey="name"
-                    stroke="#94a3b8"
-                  />
-
-                  <YAxis
-                    stroke="#94a3b8"
-                  />
-
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#1e293b",
-                      border: "1px solid #334155",
-                      borderRadius: "8px",
-                    }}
-                    formatter={(value) => [
-                      `${Number(value).toFixed(3)} kg`,
-                      "Carbon",
-                    ]}
-                  />
-
-                  <Bar
-                    dataKey="value"
-                    name="Carbon"
-                    fill="#10b981"
-                    radius={[6, 6, 0, 0]}
-                  />
-
-                </BarChart>
               </ResponsiveContainer>
 
             </div>
@@ -507,9 +739,127 @@ const historicalChartData = [...history]
 
       </section>
 
-      {/* ============================
+      {/* ========================================
+          Continue with PART 2 below
+      ======================================== */}
+            {/* ========================================
+          Multi-Period EC2 Metrics
+      ======================================== */}
+
+      <section className="recommendations-section">
+
+        <div className="section-header">
+
+          <div>
+
+            <h2>
+              EC2 Multi-Period Metrics
+            </h2>
+
+            <p>
+              CPU utilization analysis across 24 hours,
+              7 days, and 30 days.
+            </p>
+
+          </div>
+
+        </div>
+
+        {!participantMetrics?.metrics?.length ? (
+
+          <div className="no-data">
+            No EC2 metrics available.
+          </div>
+
+        ) : (
+
+          <div className="table-container">
+
+            <table className="recommendations-table">
+
+              <thead>
+
+                <tr>
+                  <th>Instance ID</th>
+                  <th>Type</th>
+                  <th>State</th>
+                  <th>CPU 24 Hours</th>
+                  <th>CPU 7 Days</th>
+                  <th>CPU 30 Days</th>
+                </tr>
+
+              </thead>
+
+              <tbody>
+
+                {participantMetrics.metrics.map(
+                  (item) => (
+
+                    <tr key={item.instance_id}>
+
+                      <td className="instance-id">
+                        {item.instance_id}
+                      </td>
+
+                      <td>
+                        {item.instance_type}
+                      </td>
+
+                      <td>
+
+                        <span className="status-badge normal">
+
+                          {item.state?.toUpperCase()}
+
+                        </span>
+
+                      </td>
+
+                      <td>
+
+                        {Number(
+                          item.cpu_24h?.average_cpu ?? 0
+                        ).toFixed(2)}
+                        %
+
+                      </td>
+
+                      <td>
+
+                        {Number(
+                          item.cpu_7d?.average_cpu ?? 0
+                        ).toFixed(2)}
+                        %
+
+                      </td>
+
+                      <td>
+
+                        {Number(
+                          item.cpu_30d?.average_cpu ?? 0
+                        ).toFixed(2)}
+                        %
+
+                      </td>
+
+                    </tr>
+
+                  )
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        )}
+
+      </section>
+
+      {/* ========================================
           Optimization Recommendations
-      ============================ */}
+      ======================================== */}
 
       <section className="recommendations-section">
 
@@ -522,8 +872,8 @@ const historicalChartData = [...history]
             </h2>
 
             <p>
-              EC2 resource optimization insights based on CPU
-              utilization, cost, and carbon impact.
+              Multi-period CPU analysis and AWS
+              resource optimization recommendations.
             </p>
 
           </div>
@@ -547,11 +897,12 @@ const historicalChartData = [...history]
                 <tr>
                   <th>Instance ID</th>
                   <th>Type</th>
-                  <th>CPU Usage</th>
+                  <th>State</th>
+                  <th>CPU 24H</th>
+                  <th>CPU 7D</th>
+                  <th>CPU 30D</th>
                   <th>Status</th>
-                  <th>Monthly Cost</th>
-                  <th>Potential Savings</th>
-                  <th>Carbon</th>
+                  <th>Confidence</th>
                   <th>Recommendation</th>
                 </tr>
 
@@ -572,10 +923,40 @@ const historicalChartData = [...history]
                     </td>
 
                     <td>
+                      {item.state}
+                    </td>
+
+                    <td>
+
                       {Number(
-                        item.average_cpu_24h ?? 0
+                        item.cpu_utilization?.[
+                          "24_hours"
+                        ] ?? 0
                       ).toFixed(2)}
                       %
+
+                    </td>
+
+                    <td>
+
+                      {Number(
+                        item.cpu_utilization?.[
+                          "7_days"
+                        ] ?? 0
+                      ).toFixed(2)}
+                      %
+
+                    </td>
+
+                    <td>
+
+                      {Number(
+                        item.cpu_utilization?.[
+                          "30_days"
+                        ] ?? 0
+                      ).toFixed(2)}
+                      %
+
                     </td>
 
                     <td>
@@ -583,36 +964,19 @@ const historicalChartData = [...history]
                       <span
                         className={`status-badge ${
                           item.optimization_status
-                            ?.toLowerCase()
+                            ?.toLowerCase() || ""
                         }`}
                       >
-                        {item.optimization_status}
+
+                        {item.optimization_status ||
+                          "UNKNOWN"}
+
                       </span>
 
                     </td>
 
                     <td>
-                      $
-                      {Number(
-                        item.estimated_monthly_cost_usd ??
-                          0
-                      ).toFixed(2)}
-                    </td>
-
-                    <td>
-                      $
-                      {Number(
-                        item.potential_monthly_savings_usd ??
-                          0
-                      ).toFixed(2)}
-                    </td>
-
-                    <td>
-                      {Number(
-                        item.estimated_carbon_kg_monthly ??
-                          0
-                      ).toFixed(3)}{" "}
-                      kg
+                      {item.confidence || "N/A"}
                     </td>
 
                     <td className="recommendation-text">
@@ -632,347 +996,509 @@ const historicalChartData = [...history]
         )}
 
       </section>
-      {/* ============================
-    Optimization Scan History
-============================ */}
 
-<section className="history-section">
+      {/* ========================================
+          Multi Account Research Summary
+      ======================================== */}
 
-  <div className="section-header">
-    <div>
-      <h2>Optimization Scan History</h2>
+      <section className="recommendations-section">
 
-      <p>
-        Historical EC2 optimization scan results stored
-        in PostgreSQL.
-      </p>
-    </div>
-  </div>
+        <div className="section-header">
 
-  {history.length === 0 ? (
+          <div>
 
-    <div className="no-data">
-      No optimization scan history available.
-    </div>
+            <h2>
+              Research Analysis Summary
+            </h2>
 
-  ) : (
+            <p>
+              Consolidated AWS multi-account
+              infrastructure, optimization, and cost
+              research results.
+            </p>
 
-    <div className="table-container">
+          </div>
 
-      <table className="recommendations-table">
+        </div>
 
-        <thead>
-          <tr>
-            <th>Scan ID</th>
-            <th>Instance ID</th>
-            <th>Type</th>
-            <th>CPU Usage</th>
-            <th>Status</th>
-            <th>Monthly Cost</th>
-            <th>Savings</th>
-            <th>Carbon Reduction</th>
-            <th>Scan Time</th>
-          </tr>
-        </thead>
+        <div className="card-grid">
 
-        <tbody>
+          <div className="card">
 
-          {history.map((item) => (
+            <p>Successful Accounts</p>
 
-            <tr key={item.id}>
+            <h2>
+              {Number(
+                researchDashboard?.accounts_summary
+                  ?.successful_accounts ?? 0
+              )}
+            </h2>
 
-              <td>
-                #{item.id}
-              </td>
+          </div>
 
-              <td className="instance-id">
-                {item.instance_id}
-              </td>
+          <div className="card">
 
-              <td>
-                {item.instance_type}
-              </td>
+            <p>Failed Accounts</p>
 
-              <td>
-                {Number(
-                  item.average_cpu_24h ?? 0
-                ).toFixed(2)}
-                %
-              </td>
+            <h2>
+              {Number(
+                researchDashboard?.accounts_summary
+                  ?.failed_accounts ?? 0
+              )}
+            </h2>
 
-              <td>
-                <span
-                  className={`status-badge ${
-                    item.optimization_status
-                      ?.toLowerCase()
-                  }`}
+          </div>
+
+          <div className="card">
+
+            <p>Research Instances</p>
+
+            <h2>
+              {Number(
+                researchDashboard
+                  ?.infrastructure_summary
+                  ?.total_instances ?? 0
+              )}
+            </h2>
+
+          </div>
+
+          <div className="card">
+
+            <p>Optimization Opportunities</p>
+
+            <h2>
+              {Number(
+                researchDashboard
+                  ?.optimization_summary
+                  ?.optimization_opportunities ?? 0
+              )}
+            </h2>
+
+          </div>
+
+          <div className="card">
+
+            <p>30-Day Research Cost</p>
+
+            <h2>
+              $
+              {Number(
+                researchDashboard?.cost_summary
+                  ?.total_cost_usd ?? 0
+              ).toFixed(2)}
+            </h2>
+
+          </div>
+
+        </div>
+
+      </section>
+
+      {/* ========================================
+          Optimization Scan History
+      ======================================== */}
+
+      <section className="history-section">
+
+        <div className="section-header">
+
+          <div>
+
+            <h2>
+              Optimization Scan History
+            </h2>
+
+            <p>
+              Historical EC2 optimization scan results
+              stored in PostgreSQL.
+            </p>
+
+          </div>
+
+        </div>
+
+        {history.length === 0 ? (
+
+          <div className="no-data">
+            No optimization scan history available.
+          </div>
+
+        ) : (
+
+          <div className="table-container">
+
+            <table className="recommendations-table">
+
+              <thead>
+
+                <tr>
+                  <th>Scan ID</th>
+                  <th>Instance ID</th>
+                  <th>Type</th>
+                  <th>CPU Usage</th>
+                  <th>Status</th>
+                  <th>Monthly Cost</th>
+                  <th>Savings</th>
+                  <th>Carbon Reduction</th>
+                  <th>Scan Time</th>
+                </tr>
+
+              </thead>
+
+              <tbody>
+
+                {history.map((item) => (
+
+                  <tr key={item.id}>
+
+                    <td>
+                      #{item.id}
+                    </td>
+
+                    <td className="instance-id">
+                      {item.instance_id}
+                    </td>
+
+                    <td>
+                      {item.instance_type}
+                    </td>
+
+                    <td>
+
+                      {Number(
+                        item.average_cpu_24h ?? 0
+                      ).toFixed(2)}
+                      %
+
+                    </td>
+
+                    <td>
+
+                      <span
+                        className={`status-badge ${
+                          item.optimization_status
+                            ?.toLowerCase() || ""
+                        }`}
+                      >
+
+                        {item.optimization_status}
+
+                      </span>
+
+                    </td>
+
+                    <td>
+
+                      $
+                      {Number(
+                        item.estimated_monthly_cost_usd ??
+                          0
+                      ).toFixed(2)}
+
+                    </td>
+
+                    <td>
+
+                      $
+                      {Number(
+                        item.potential_monthly_savings_usd ??
+                          0
+                      ).toFixed(2)}
+
+                    </td>
+
+                    <td>
+
+                      {Number(
+                        item.potential_carbon_reduction_kg ??
+                          0
+                      ).toFixed(3)}
+                      {" "}kg
+
+                    </td>
+
+                    <td className="scan-time">
+
+                      {item.created_at
+                        ? new Date(
+                            item.created_at
+                          ).toLocaleString()
+                        : "N/A"}
+
+                    </td>
+
+                  </tr>
+
+                ))}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        )}
+
+      </section>
+
+      {/* ========================================
+          Historical Analytics
+      ======================================== */}
+
+      <section className="analytics-section">
+
+        <div className="section-header">
+
+          <div>
+
+            <h2>
+              Historical Analytics
+            </h2>
+
+            <p>
+              Track EC2 utilization, cost savings,
+              and carbon reduction across optimization
+              scans.
+            </p>
+
+          </div>
+
+        </div>
+
+        {historicalChartData.length === 0 ? (
+
+          <div className="no-data">
+            No historical analytics data available.
+          </div>
+
+        ) : (
+
+          <div className="charts-grid">
+
+            {/* ==================================
+                CPU Utilization Trend
+            ================================== */}
+
+            <div className="chart-card">
+
+              <h3>
+                CPU Utilization Trend
+              </h3>
+
+              <p className="chart-description">
+                Historical average CPU utilization
+                recorded during optimization scans.
+              </p>
+
+              <div className="chart-wrapper">
+
+                <ResponsiveContainer
+                  width="100%"
+                  height={300}
                 >
-                  {item.optimization_status}
-                </span>
-              </td>
 
-              <td>
-                $
-                {Number(
-                  item.estimated_monthly_cost_usd ?? 0
-                ).toFixed(2)}
-              </td>
+                  <LineChart
+                    data={historicalChartData}
+                  >
+
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#334155"
+                    />
+
+                    <XAxis
+                      dataKey="scanId"
+                      stroke="#94a3b8"
+                    />
+
+                    <YAxis
+                      stroke="#94a3b8"
+                      unit="%"
+                    />
+
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor:
+                          "#1e293b",
+                        border:
+                          "1px solid #334155",
+                        borderRadius: "8px",
+                      }}
+                      formatter={(value) => [
+                        `${Number(
+                          value
+                        ).toFixed(2)}%`,
+                        "CPU Usage",
+                      ]}
+                    />
+
+                    <Line
+                      type="monotone"
+                      dataKey="cpu"
+                      name="CPU Usage"
+                      stroke="#3b82f6"
+                      strokeWidth={3}
+                    />
+
+                  </LineChart>
+
+                </ResponsiveContainer>
+
+              </div>
+
+            </div>
+
+            {/* ==================================
+                Cost Savings Trend
+            ================================== */}
+
+            <div className="chart-card">
+
+              <h3>
+                Cost Savings Trend
+              </h3>
+
+              <p className="chart-description">
+                Potential monthly savings identified
+                during each optimization scan.
+              </p>
+
+              <div className="chart-wrapper">
+
+                <ResponsiveContainer
+                  width="100%"
+                  height={300}
+                >
+
+                  <LineChart
+                    data={historicalChartData}
+                  >
+
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#334155"
+                    />
+
+                    <XAxis
+                      dataKey="scanId"
+                      stroke="#94a3b8"
+                    />
+
+                    <YAxis
+                      stroke="#94a3b8"
+                    />
+
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor:
+                          "#1e293b",
+                        border:
+                          "1px solid #334155",
+                        borderRadius: "8px",
+                      }}
+                      formatter={(value) => [
+                        `$${Number(
+                          value
+                        ).toFixed(2)}`,
+                        "Potential Savings",
+                      ]}
+                    />
+
+                    <Line
+                      type="monotone"
+                      dataKey="savings"
+                      name="Potential Savings"
+                      stroke="#22c55e"
+                      strokeWidth={3}
+                    />
+
+                  </LineChart>
+
+                </ResponsiveContainer>
+
+              </div>
+
+            </div>
+
+            {/* ==================================
+                Carbon Reduction Trend
+            ================================== */}
+
+            <div className="chart-card">
+
+              <h3>
+                Carbon Reduction Trend
+              </h3>
+
+              <p className="chart-description">
+                Potential carbon reduction identified
+                across historical optimization scans.
+              </p>
+
+              <div className="chart-wrapper">
+
+                <ResponsiveContainer
+                  width="100%"
+                  height={300}
+                >
+
+                  <LineChart
+                    data={historicalChartData}
+                  >
+
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#334155"
+                    />
+
+                    <XAxis
+                      dataKey="scanId"
+                      stroke="#94a3b8"
+                    />
+
+                    <YAxis
+                      stroke="#94a3b8"
+                    />
+
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor:
+                          "#1e293b",
+                        border:
+                          "1px solid #334155",
+                        borderRadius: "8px",
+                      }}
+                      formatter={(value) => [
+                        `${Number(
+                          value
+                        ).toFixed(3)} kg`,
+                        "Carbon Reduction",
+                      ]}
+                    />
+
+                    <Line
+                      type="monotone"
+                      dataKey="carbonReduction"
+                      name="Carbon Reduction"
+                      stroke="#10b981"
+                      strokeWidth={3}
+                    />
+
+                  </LineChart>
+
+                </ResponsiveContainer>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        )}
+
+      </section>
 
-              <td>
-                $
-                {Number(
-                  item.potential_monthly_savings_usd ?? 0
-                ).toFixed(2)}
-              </td>
-
-              <td>
-                {Number(
-                  item.potential_carbon_reduction_kg ?? 0
-                ).toFixed(3)}{" "}
-                kg
-              </td>
-
-              <td className="scan-time">
-                {item.created_at
-                  ? new Date(
-                      item.created_at
-                    ).toLocaleString()
-                  : "N/A"}
-              </td>
-
-            </tr>
-
-          ))}
-
-        </tbody>
-
-      </table>
-
-    </div>
-
-  )}
-
-</section>
-{/* ============================
-    Historical Analytics
-============================ */}
-
-<section className="analytics-section">
-
-  <div className="section-header">
-    <div>
-      <h2>Historical Analytics</h2>
-      <p>
-        Track EC2 utilization, cost savings, and carbon
-        reduction across optimization scans.
-      </p>
-    </div>
-  </div>
-
-  {historicalChartData.length === 0 ? (
-
-    <div className="no-data">
-      No historical analytics data available.
-    </div>
-
-  ) : (
-
-    <div className="charts-grid">
-
-      {/* CPU Utilization Trend */}
-
-      <div className="chart-card">
-
-        <h3>CPU Utilization Trend</h3>
-
-        <p className="chart-description">
-          Historical average CPU utilization recorded during
-          optimization scans.
-        </p>
-
-        <div className="chart-wrapper">
-
-          <ResponsiveContainer
-            width="100%"
-            height={300}
-          >
-
-            <LineChart data={historicalChartData}>
-
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="#334155"
-              />
-
-              <XAxis
-                dataKey="scanId"
-                stroke="#94a3b8"
-              />
-
-              <YAxis
-                stroke="#94a3b8"
-                unit="%"
-              />
-
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#1e293b",
-                  border: "1px solid #334155",
-                  borderRadius: "8px",
-                }}
-                formatter={(value) => [
-                  `${Number(value).toFixed(2)}%`,
-                  "CPU Usage",
-                ]}
-              />
-
-              <Line
-                type="monotone"
-                dataKey="cpu"
-                name="CPU Usage"
-                stroke="#3b82f6"
-                strokeWidth={3}
-              />
-
-            </LineChart>
-
-          </ResponsiveContainer>
-
-        </div>
-
-      </div>
-
-
-      {/* Cost Savings Trend */}
-
-      <div className="chart-card">
-
-        <h3>Cost Savings Trend</h3>
-
-        <p className="chart-description">
-          Potential monthly savings identified during each
-          optimization scan.
-        </p>
-
-        <div className="chart-wrapper">
-
-          <ResponsiveContainer
-            width="100%"
-            height={300}
-          >
-
-            <LineChart data={historicalChartData}>
-
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="#334155"
-              />
-
-              <XAxis
-                dataKey="scanId"
-                stroke="#94a3b8"
-              />
-
-              <YAxis
-                stroke="#94a3b8"
-              />
-
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#1e293b",
-                  border: "1px solid #334155",
-                  borderRadius: "8px",
-                }}
-                formatter={(value) => [
-                  `$${Number(value).toFixed(2)}`,
-                  "Potential Savings",
-                ]}
-              />
-
-              <Line
-                type="monotone"
-                dataKey="savings"
-                name="Potential Savings"
-                stroke="#22c55e"
-                strokeWidth={3}
-              />
-
-            </LineChart>
-
-          </ResponsiveContainer>
-
-        </div>
-
-      </div>
-
-
-      {/* Carbon Reduction Trend */}
-
-      <div className="chart-card">
-
-        <h3>Carbon Reduction Trend</h3>
-
-        <p className="chart-description">
-          Potential carbon reduction identified across
-          historical optimization scans.
-        </p>
-
-        <div className="chart-wrapper">
-
-          <ResponsiveContainer
-            width="100%"
-            height={300}
-          >
-
-            <LineChart data={historicalChartData}>
-
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="#334155"
-              />
-
-              <XAxis
-                dataKey="scanId"
-                stroke="#94a3b8"
-              />
-
-              <YAxis
-                stroke="#94a3b8"
-              />
-
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#1e293b",
-                  border: "1px solid #334155",
-                  borderRadius: "8px",
-                }}
-                formatter={(value) => [
-                  `${Number(value).toFixed(3)} kg`,
-                  "Carbon Reduction",
-                ]}
-              />
-
-              <Line
-                type="monotone"
-                dataKey="carbonReduction"
-                name="Carbon Reduction"
-                stroke="#10b981"
-                strokeWidth={3}
-              />
-
-            </LineChart>
-
-          </ResponsiveContainer>
-
-        </div>
-
-      </div>
-
-    </div>
-
-  )}
-
-</section>
     </div>
   );
 }
